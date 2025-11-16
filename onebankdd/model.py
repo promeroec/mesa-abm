@@ -1,10 +1,11 @@
 """
-Mesa-agnostic implementation of the one-bank Diamond–Dybvig ABM
-based on the NetLogo model DDmodelV4.nlogo.
+Python-Mesa implementation of the Diamond–Dybvig Agent-based model
+inspired by the NetLogo model DDmodelV4.nlogo, in the paper 
+"Bank runs, banking contracts, and social networks," 2009, by Pedro Romero.
+https://www.researchgate.net/publication/228201003_Bank_Runs_Banking_Contracts_and_Social_Networks
 
-We deliberately DO NOT subclass mesa.Agent to avoid version-specific
-constructor issues. Agents are plain Python objects; Mesa's MultiGrid
-handles them just fine as long as they have a .pos attribute.
+I DO NOT subclass mesa.Agent to avoid version-specific
+constructor issues. Agents are plain Python objects.
 """
 
 from __future__ import annotations

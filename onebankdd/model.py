@@ -1,31 +1,27 @@
 """
-Mesa implementation of Pedro P. Romero's one-bank Diamond–Dybvig ABM
+Mesa-agnostic implementation of the one-bank Diamond–Dybvig ABM
 based on the NetLogo model DDmodelV4.nlogo.
 
-Key features:
-    - 1 bank at the center of a 21x21 torus (441 depositors / patches)
-    - Each patch is a depositor, either impatient (green) or patient (yellow)
-    - Two rate regimes: 'fixed' and 'random'
-    - Two consumption regimes: 'constant' and 'variable'
-    - Social network effect: patient depositors may join a run if at least
-      three of their eight neighbors have already withdrawn early.
+We deliberately DO NOT subclass mesa.Agent to avoid version-specific
+constructor issues. Agents are plain Python objects; Mesa's MultiGrid
+handles them just fine as long as they have a .pos attribute.
 """
 
 from __future__ import annotations
 
 from typing import List, Optional
 
-from mesa import Agent, Model
+from mesa import Model
 from mesa.space import MultiGrid
 from mesa.datacollection import DataCollector
 
 
 # ---------------------------------------------------------------------
-# Agents
+# Agents (plain Python classes, NOT subclassing mesa.Agent)
 # ---------------------------------------------------------------------
 
 
-class BankAgent(Agent):
+class BankAgent:
     """
     Bank balance sheet.
 
@@ -35,21 +31,21 @@ class BankAgent(Agent):
     """
 
     def __init__(self, unique_id: str, model: "OneBankDDModel") -> None:
-        # NOTE: we do NOT call super().__init__ to avoid Mesa version conflicts.
-        # We set the core attributes ourselves.
         self.unique_id = unique_id
         self.model = model
         self.random = model.random
+        self.pos = None  # MultiGrid will set this
 
         self.init_deposits: float = 0.0
         self.fin_balance: float = 0.0
         self.served: int = 0
 
-    def step(self) -> None:  # not used, but kept for completeness
+    def step(self) -> None:
+        # Not used, but kept for symmetry with Mesa agents.
         return
 
 
-class DepositorAgent(Agent):
+class DepositorAgent:
     """
     Depositor modeled after a NetLogo patch in DDmodelV4.
 
@@ -70,10 +66,10 @@ class DepositorAgent(Agent):
         impatient: bool,
         initial_deposit: float = 1.0,
     ) -> None:
-        # Again, do NOT call super().__init__; we set everything ourselves.
         self.unique_id = unique_id
         self.model = model
         self.random = model.random
+        self.pos = None  # MultiGrid will set this
 
         self.impatient: bool = impatient
 
@@ -125,8 +121,7 @@ class DepositorAgent(Agent):
         n_impatient = self.model.num_impatients
         N = self.model.num_depositors
         consume1 = 1.0 + self.random.random() * 0.2
-        # n_withdraw1 is in the NetLogo code but not used in the active branch
-        _n_withdraw1 = self.model.num_withdraw1
+        _n_withdraw1 = self.model.num_withdraw1  # not used in active branch
 
         # reset for this tick
         self.withdraw1 = 0.0

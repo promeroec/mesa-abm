@@ -35,7 +35,12 @@ class BankAgent(Agent):
     """
 
     def __init__(self, unique_id: str, model: "OneBankDDModel") -> None:
-        super().__init__(model, unique_id=unique_id) # Corrected line
+        # NOTE: we do NOT call super().__init__ to avoid Mesa version conflicts.
+        # We set the core attributes ourselves.
+        self.unique_id = unique_id
+        self.model = model
+        self.random = model.random
+
         self.init_deposits: float = 0.0
         self.fin_balance: float = 0.0
         self.served: int = 0
@@ -65,7 +70,11 @@ class DepositorAgent(Agent):
         impatient: bool,
         initial_deposit: float = 1.0,
     ) -> None:
-        super().__init__(unique_id, model)
+        # Again, do NOT call super().__init__; we set everything ourselves.
+        self.unique_id = unique_id
+        self.model = model
+        self.random = model.random
+
         self.impatient: bool = impatient
 
         # economic state
@@ -116,7 +125,8 @@ class DepositorAgent(Agent):
         n_impatient = self.model.num_impatients
         N = self.model.num_depositors
         consume1 = 1.0 + self.random.random() * 0.2
-        n_withdraw1 = self.model.num_withdraw1  # used only for symmetry
+        # n_withdraw1 is in the NetLogo code but not used in the active branch
+        _n_withdraw1 = self.model.num_withdraw1
 
         # reset for this tick
         self.withdraw1 = 0.0
@@ -235,7 +245,7 @@ class OneBankDDModel(Model):
         self.consumption_mode = consumption_mode
         self.initial_deposit = initial_deposit
 
-        # space (no scheduler needed)
+        # space
         self.grid = MultiGrid(width, height, torus=True)
 
         # bank at center

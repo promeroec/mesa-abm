@@ -1,6 +1,7 @@
 """
 Python-Mesa implementation of the Diamond–Dybvig Agent-based model
-inspired by the NetLogo model DDmodelV4.nlogo, in the paper 
+that includes social networkd for depositors. 
+Inspired by the NetLogo model 3 DDmodelV4.nlogo, in the paper 
 "Bank runs, banking contracts, and social networks," 2009, by Pedro Romero.
 https://www.researchgate.net/publication/228201003_Bank_Runs_Banking_Contracts_and_Social_Networks
 

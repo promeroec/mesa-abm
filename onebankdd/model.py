@@ -35,7 +35,7 @@ class BankAgent(Agent):
     """
 
     def __init__(self, unique_id: str, model: "OneBankDDModel") -> None:
-        super().__init__(unique_id, model)
+        super().__init__(model, unique_id=unique_id) # Corrected line
         self.init_deposits: float = 0.0
         self.fin_balance: float = 0.0
         self.served: int = 0

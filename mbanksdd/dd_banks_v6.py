@@ -1,36 +1,40 @@
 # mbanksdd/dd_banks_v6.py
 #
-# Mesa implementation of Pedro Romero's multibank Diamond–Dybvig ABM (V6).
+# Mesa-style implementation of Pedro Romero's multibank Diamond–Dybvig ABM (V6),
+# without subclassing mesa.Agent (to avoid version issues).
+#
 # Scenarios:
 #   1. multi-bank, no interbank market
 #   2. multi-bank, with interbank market
 #   3. multi-bank, with interbank market + one "big" bank
 #
-# Use the helper functions at the bottom (make_isolated_model, etc.)
-# to build the different scenarios.
+# Use the helper functions at the bottom:
+#   - make_isolated_model
+#   - make_interbank_model
+#   - make_big_bank_model
 
-from mesa import Model, Agent
+from mesa import Model
 from mesa.datacollection import DataCollector
 import random
 from typing import List, Optional
 
 
-class CustomerAgent(Agent):
+class CustomerAgent:
     """
-    Depositor/customer.
-    NetLogo analogue: breed 'customers'
+    Depositor/customer (NetLogo 'customers').
 
-    Key state:
-      deposit_t0  (deposit-t0)
-      withdraw1, withdraw2
-      Rc          (subjective interest rate)
-      account1, account2
-      dtype       ("impatient" or "patient")
-      active      (bool)
+    State:
+      - deposit_t0  (deposit-t0)
+      - withdraw1, withdraw2
+      - Rc          (subjective interest rate)
+      - account1, account2
+      - dtype       ("impatient" or "patient")
+      - active      (bool)
     """
 
     def __init__(self, unique_id, model, bank, dtype: str, initial_deposit: float = 1.0):
-        super().__init__(unique_id, model)
+        self.unique_id = unique_id
+        self.model = model
         self.bank = bank
         self.dtype = dtype
         self.deposit_t0 = initial_deposit
@@ -131,21 +135,21 @@ class CustomerAgent(Agent):
             self.deposit_t0 = min(self.deposit_t0, 0.0)
 
 
-class BankAgent(Agent):
+class BankAgent:
     """
-    Bank.
-    NetLogo analogue: breed 'banks'
+    Bank (NetLogo 'banks').
 
-    Key state:
-      init_deposits
-      fin_balance
-      loan_principal, loan_lender
-      Rb, n_served
-      active, failed
+    State:
+      - init_deposits
+      - fin_balance
+      - loan_principal, loan_lender (interbank)
+      - Rb, n_served
+      - active, failed
     """
 
     def __init__(self, unique_id, model, customer_ids: List[int]):
-        super().__init__(unique_id, model)
+        self.unique_id = unique_id
+        self.model = model
         self.customer_ids = customer_ids
         self.customers: List[CustomerAgent] = []
 
@@ -204,7 +208,7 @@ class BankAgent(Agent):
 
         self.n_served = n_served
 
-        # Investment rule
+        # Investment rule (global impatient info, as in V6)
         n_impatient = self.model.n_impatient_total
         expected_impatient = self.model.impatient_probability * self.model.num_customers_total
         threshold = n_impatient / max(1e-9, expected_impatient)
@@ -218,6 +222,7 @@ class BankAgent(Agent):
 
         self.fin_balance = self.init_deposits - tot_withdrawals + invest + self.loan_principal
 
+        # If insolvent and still has customers to serve, try interbank or fail
         if self.fin_balance < 0 and (self.n_served < self.num_customers):
             if self.model.interbank_market:
                 self.request_interbank_loan()
@@ -238,7 +243,7 @@ class BankAgent(Agent):
             self.go_bankrupt()
             return
 
-        lender = self.random.choice(candidates)
+        lender = random.choice(candidates)
         loan_amount = 0.1 * lender.fin_balance
 
         lender.fin_balance -= loan_amount
@@ -297,8 +302,6 @@ class BankRunModelV6(Model):
         self.customer_distribution = customer_distribution
 
         self.num_customers_total = sum(customer_distribution)
-
-        # Manual time counter (instead of BaseScheduler.time)
         self.time = 0
 
         self.banks: List[BankAgent] = []
@@ -315,7 +318,7 @@ class BankRunModelV6(Model):
                              customer_ids=customer_ids_for_bank)
             self.banks.append(bank)
 
-        # Create customers
+        # Create customers and attach to banks
         for bank in self.banks:
             for cid in bank.customer_ids:
                 if random.random() < self.impatient_probability:
@@ -335,14 +338,10 @@ class BankRunModelV6(Model):
 
         self.n_impatient_total = sum(1 for c in self.customers if c.dtype == "impatient")
 
+        # Only model-level reporter (no agent_reporters -> no schedule dependency)
         self.datacollector = DataCollector(
             model_reporters={
                 "num_failed_banks": lambda m: sum(1 for b in m.banks if b.failed),
-            },
-            agent_reporters={
-                "fin_balance": lambda a: getattr(a, "fin_balance", None),
-                "deposit_t0": lambda a: getattr(a, "deposit_t0", None),
-                "dtype": lambda a: getattr(a, "dtype", None),
             },
         )
 

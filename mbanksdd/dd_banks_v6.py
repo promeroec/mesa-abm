@@ -10,7 +10,6 @@
 # to build the different scenarios.
 
 from mesa import Model, Agent
-from mesa.time import BaseScheduler
 from mesa.datacollection import DataCollector
 import random
 from typing import List, Optional
@@ -299,7 +298,9 @@ class BankRunModelV6(Model):
 
         self.num_customers_total = sum(customer_distribution)
 
-        self.schedule = BaseScheduler(self)
+        # Manual time counter (instead of BaseScheduler.time)
+        self.time = 0
+
         self.banks: List[BankAgent] = []
         self.customers: List[CustomerAgent] = []
 
@@ -313,7 +314,6 @@ class BankRunModelV6(Model):
             bank = BankAgent(unique_id=f"B{bank_id}", model=self,
                              customer_ids=customer_ids_for_bank)
             self.banks.append(bank)
-            self.schedule.add(bank)
 
         # Create customers
         for bank in self.banks:
@@ -332,7 +332,6 @@ class BankRunModelV6(Model):
                 )
                 self.customers.append(cust)
                 bank.customers.append(cust)
-                self.schedule.add(cust)
 
         self.n_impatient_total = sum(1 for c in self.customers if c.dtype == "impatient")
 
@@ -370,7 +369,7 @@ class BankRunModelV6(Model):
             bank.update_balance_sheet()
 
         self.datacollector.collect(self)
-        self.schedule.time += 1
+        self.time += 1
 
     def run_model(self, n_steps: int):
         for _ in range(n_steps):

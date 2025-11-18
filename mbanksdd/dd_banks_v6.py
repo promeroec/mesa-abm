@@ -1,7 +1,7 @@
 # mbanksdd/dd_banks_v6.py
 #
 # Queue-based Mesa implementation of the multibank Diamond–Dybvig ABM (V6),
-# designed to preserve the key economic logic from Pedro Romero's NetLogo model:
+# from Pedro Romero's NetLogo model:
 #
 #  - Depositors choose early vs late withdrawal based on type, Rc, Rb & queue info
 #  - Banks invest leftover funds at rate Rb; when withdrawals are large, this can

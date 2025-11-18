@@ -61,6 +61,7 @@ class Customer:
 
         self.active = True
         self.has_decided = False
+        self.withdrawals_applied = False
 
     # --- decision primitives -------------------------------------------------
 
@@ -143,13 +144,16 @@ class Customer:
         # Mark that this customer has been processed in the queue
         self.has_decided = True
 
-    def apply_withdrawals_and_update_accounts(self):
+        def apply_withdrawals_and_update_accounts(self):
         """
-        Apply withdraw1/withdraw2 to deposit_t0 and update account1/account2.
-        This is the analogue of NetLogo 'fitness-check', but it is called
-        AFTER banks have used withdraw1+withdraw2 to compute fin_balance.
+        Apply withdraw1/withdraw2 to deposit_t0 and update account1/account2
+        **only once**, after the bank has used them to update its balance sheet.
         """
-        if not self.active:
+        # Only apply if:
+        #  - customer is still active,
+        #  - has already decided (served in queue),
+        #  - and hasn't had withdrawals applied yet
+        if (not self.active) or (not self.has_decided) or self.withdrawals_applied:
             return
 
         w1 = self.withdraw1
@@ -166,6 +170,10 @@ class Customer:
 
         if (self.account1 < 0) or (self.account2 < 0) or (self.deposit_t0 < 0):
             self.active = False
+
+        # Mark that we've applied withdrawals once
+        self.withdrawals_applied = True
+
 
 
 # ----------------------------------------------------------------------

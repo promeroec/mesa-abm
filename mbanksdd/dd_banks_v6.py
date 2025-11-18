@@ -144,35 +144,35 @@ class Customer:
         # Mark that this customer has been processed in the queue
         self.has_decided = True
 
-        def apply_withdrawals_and_update_accounts(self):
-            """
-            Apply withdraw1/withdraw2 to deposit_t0 and update account1/account2
-            **only once**, after the bank has used them to update its balance sheet.
-            """
-            # Only apply if:
-            #  - customer is still active,
-            #  - has already decided (served in queue),
-            #  - and hasn't had withdrawals applied yet
-            if (not self.active) or (not self.has_decided) or self.withdrawals_applied:
-                return
+    def apply_withdrawals_and_update_accounts(self):
+        """
+        Apply withdraw1/withdraw2 to deposit_t0 and update account1/account2
+        **only once**, after the bank has used them to update its balance sheet.
+        """
+        # Only apply if:
+        #  - customer is still active,
+        #  - has already decided (served in queue),
+        #  - and hasn't had withdrawals applied yet
+        if (not self.active) or (not self.has_decided) or self.withdrawals_applied:
+            return
     
-            w1 = self.withdraw1
-            w2 = self.withdraw2
+        w1 = self.withdraw1
+        w2 = self.withdraw2
     
-            if self.dtype == "impatient":
-                self.account1 = self.deposit_t0 - w1 - w2
-                self.deposit_t0 = self.account1
-                self.account2 = self.deposit_t0
-            else:
-                self.account2 = self.deposit_t0 - w2 - w1
-                self.deposit_t0 = self.account2
-                self.account1 = self.deposit_t0
+        if self.dtype == "impatient":
+            self.account1 = self.deposit_t0 - w1 - w2
+            self.deposit_t0 = self.account1
+            self.account2 = self.deposit_t0
+        else:
+            self.account2 = self.deposit_t0 - w2 - w1
+            self.deposit_t0 = self.account2
+            self.account1 = self.deposit_t0
     
-            if (self.account1 < 0) or (self.account2 < 0) or (self.deposit_t0 < 0):
-                self.active = False
+        if (self.account1 < 0) or (self.account2 < 0) or (self.deposit_t0 < 0):
+            self.active = False
     
             # Mark that we've applied withdrawals once
-            self.withdrawals_applied = True
+        self.withdrawals_applied = True
 
 
 

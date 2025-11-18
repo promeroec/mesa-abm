@@ -530,7 +530,7 @@ def make_interbank_model(
 
 def make_big_bank_model(
     big_bank_index: int = 0,
-    big_size: int = 10,
+    big_size: int = 25,
     small_size: int = 5,
     num_small_banks: int = 3,
     impatient_probability: float = 0.5,

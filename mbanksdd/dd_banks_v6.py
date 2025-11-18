@@ -1,88 +1,113 @@
 # mbanksdd/dd_banks_v6.py
 #
-# Mesa-style implementation of Pedro Romero's multibank Diamond–Dybvig ABM (V6),
-# without subclassing mesa.Agent (to avoid version issues).
+# Queue-based Mesa implementation of the multibank Diamond–Dybvig ABM (V6),
+# designed to preserve the key economic logic from Pedro Romero's NetLogo model:
 #
-# Scenarios:
-#   1. multi-bank, no interbank market
-#   2. multi-bank, with interbank market
-#   3. multi-bank, with interbank market + one "big" bank
+#  - Depositors choose early vs late withdrawal based on type, Rc, Rb & queue info
+#  - Banks invest leftover funds at rate Rb; when withdrawals are large, this can
+#    *reduce* funds (because (init_deposits - tot_withdrawals) can be negative)
+#  - Banks face runs when they hit fin_balance < 0 while there are still
+#    unserved depositors in their queue (n_served < num_customers)
+#  - Industrial setups:
+#       * Isolated banks (no interbank market)
+#       * Interbank market with symmetric banks
+#       * Interbank market with one "big" bank
 #
-# Use the helper functions at the bottom:
-#   - make_isolated_model
-#   - make_interbank_model
-#   - make_big_bank_model
+# The model is written in a Mesa style but does NOT subclass mesa.Agent
+# to avoid version issues; only Model + DataCollector come from Mesa.
 
 from mesa import Model
 from mesa.datacollection import DataCollector
 import random
-from typing import List, Optional
+from typing import List, Optional, Dict, Set
 
 
-class CustomerAgent:
+# ----------------------------------------------------------------------
+# Customer / Depositor
+# ----------------------------------------------------------------------
+
+class Customer:
     """
-    Depositor/customer (NetLogo 'customers').
+    Depositor (NetLogo 'customers').
 
     State:
-      - deposit_t0  (deposit-t0)
-      - withdraw1, withdraw2
-      - Rc          (subjective interest rate)
-      - account1, account2
-      - dtype       ("impatient" or "patient")
-      - active      (bool)
+      - deposit_t0 : current deposit
+      - withdraw1, withdraw2 : potential t=1, t=2 withdrawals (decision)
+      - Rc       : subjective return
+      - account1, account2 : post-withdrawal accounts (for diagnostics)
+      - dtype    : "impatient" or "patient"
+      - active   : can still be served / has funds
+      - has_decided : has already chosen withdrawals (served in queue)
     """
 
-    def __init__(self, unique_id, model, bank, dtype: str, initial_deposit: float = 1.0):
+    def __init__(self, unique_id: str, model: "BankRunModelV6",
+                 bank: "Bank", dtype: str, initial_deposit: float = 1.0):
         self.unique_id = unique_id
         self.model = model
         self.bank = bank
         self.dtype = dtype
+
         self.deposit_t0 = initial_deposit
 
         self.withdraw1 = 0.0
         self.withdraw2 = 0.0
 
         self.Rc = 1.0
-        self.account1 = 0.0
-        self.account2 = 0.0
+        self.account1 = initial_deposit
+        self.account2 = initial_deposit
+
         self.fitness1 = 0.0
         self.fitness2 = 0.0
 
         self.active = True
+        self.has_decided = False
+
+    # --- decision primitives -------------------------------------------------
 
     def draw_subjective_rate(self):
-        """Draw subjective return Rc ~ 1 + U(0, 0.5) each period."""
+        """Draw Rc ~ 1 + U(0, 0.5) each period."""
+        if not self.active:
+            return
         self.Rc = 1.0 + random.random() * 0.5
 
     def decide_withdrawals(self):
         """
-        Decision rule for early vs late withdrawal (clean version of NetLogo 'make-decision').
+        Early vs late withdrawal decision (NetLogo 'make-decision', simplified).
 
-        - Impatient agents always withdraw at t=1 (size depends on queue pressure).
-        - Patient agents may withdraw early if queues are long and Rc > Rb;
-          otherwise they wait and withdraw at t=2.
+        We DO NOT apply withdrawals here; we just decide withdraw1/withdraw2.
+        Deposits / accounts are updated later, *after* banks update balances,
+        so that even depositors who end up with negative accounts still count
+        in tot-withdrawals in this step (as in NetLogo).
         """
-        if not self.active or self.deposit_t0 <= 0:
-            self.withdraw1 = 0.0
-            self.withdraw2 = 0.0
+        if not self.active or self.has_decided:
             return
 
         bank = self.bank
         Rb = bank.Rb
 
+        # Small random consumption preference for early withdrawal
         consume1 = 1.0 + random.random() * 0.2
 
-        # Bank-level queue pressure:
-        frac_served = bank.n_served / max(1, bank.num_customers)
+        # Bank-level queue information
+        bank_frac_served = bank.n_served / max(1, bank.num_customers)
 
-        # System-wide information about impatients (mirroring V6 logic):
-        n_impatient = self.model.n_impatient_total
-        expected_impatient = self.model.impatient_probability * self.model.num_customers_total
-        threshold = n_impatient / max(1e-9, expected_impatient)
+        # System-wide impatience information (NetLogo spirit)
+        # Originally: (n_served/10) vs (n_impatient/(40*impatient_prob)).
+        # Here we generalize to arbitrary bank sizes:
+        #   threshold ≈ "fraction of customers in system who are impatient".
+        if self.model.impatient_probability > 0:
+            system_impatient_fraction = (
+                self.model.n_impatient_total /
+                (self.model.num_customers_total * self.model.impatient_probability)
+            )
+        else:
+            system_impatient_fraction = 1.0  # degenerate case
 
-        # ---------- Impatient agents ----------
+        # --- Impatient agents -------------------------------------------------
         if self.dtype == "impatient":
-            if frac_served > threshold:
+            # If lots of people have already been served relative to expected impatient mass,
+            # the impatient may "rush" and grab 1 unit (like your NetLogo).
+            if bank_frac_served > system_impatient_fraction:
                 self.fitness1 = 1.0
             else:
                 self.fitness1 = consume1
@@ -91,16 +116,17 @@ class CustomerAgent:
             self.fitness2 = 0.0
             self.withdraw2 = 0.0
 
-        # ---------- Patient agents ----------
+        # --- Patient agents ---------------------------------------------------
         else:
-            if (frac_served > threshold) and (self.Rc > Rb):
-                # Early withdrawal
+            # Condition to trigger early withdrawal for patient agents:
+            # many already served at this bank AND Rc > Rb (run-like behavior)
+            if (bank_frac_served > system_impatient_fraction) and (self.Rc > Rb):
                 self.fitness1 = consume1
                 self.withdraw1 = self.fitness1
                 self.fitness2 = 0.0
                 self.withdraw2 = 0.0
             else:
-                # Wait to t=2
+                # Late withdrawal: NetLogo's functional form
                 if bank.n_served > 1:
                     denom = 1.0 - bank.n_served
                     if abs(denom) < 1e-9:
@@ -114,10 +140,18 @@ class CustomerAgent:
                 self.fitness1 = 0.0
                 self.withdraw1 = 0.0
 
-        self._update_accounts()
+        # Mark that this customer has been processed in the queue
+        self.has_decided = True
 
-    def _update_accounts(self):
-        """Update accounts & deposits after choosing withdrawals (NetLogo 'fitness-check')."""
+    def apply_withdrawals_and_update_accounts(self):
+        """
+        Apply withdraw1/withdraw2 to deposit_t0 and update account1/account2.
+        This is the analogue of NetLogo 'fitness-check', but it is called
+        AFTER banks have used withdraw1+withdraw2 to compute fin_balance.
+        """
+        if not self.active:
+            return
+
         w1 = self.withdraw1
         w2 = self.withdraw2
 
@@ -132,50 +166,91 @@ class CustomerAgent:
 
         if (self.account1 < 0) or (self.account2 < 0) or (self.deposit_t0 < 0):
             self.active = False
-            self.deposit_t0 = min(self.deposit_t0, 0.0)
 
 
-class BankAgent:
+# ----------------------------------------------------------------------
+# Bank
+# ----------------------------------------------------------------------
+
+class Bank:
     """
     Bank (NetLogo 'banks').
 
     State:
-      - init_deposits
-      - fin_balance
-      - loan_principal, loan_lender (interbank)
-      - Rb, n_served
+      - init_deposits : sum of initial deposits of its customers
+      - fin_balance   : current balance (after investment, withdrawals, loans)
+      - Rb            : bank's investment return
+      - loan_principal, loan_lender : interbank borrowing
+      - queue_index   : where we are in the service queue
+      - served_customers : set of customers who have been served at least once
+      - n_served      : |served_customers|
       - active, failed
     """
 
-    def __init__(self, unique_id, model, customer_ids: List[int]):
+    def __init__(self, unique_id: str, model: "Bank",
+                 customer_ids: List[int]):
         self.unique_id = unique_id
         self.model = model
         self.customer_ids = customer_ids
-        self.customers: List[CustomerAgent] = []
+        self.customers: List[Customer] = []
 
         self.num_customers = len(customer_ids)
 
         self.init_deposits = self.num_customers * self.model.initial_deposit
         self.fin_balance = self.init_deposits
 
-        self.loan_principal = 0.0
-        self.loan_lender: Optional["BankAgent"] = None
-
         self.Rb = 1.0
-        self.active = True
-        self.failed = False
+
+        self.loan_principal = 0.0
+        self.loan_lender: Optional["Bank"] = None
+
+        self.queue_index = 0
+        self.served_customers: Set[str] = set()
         self.n_served = 0
 
+        self.active = True
+        self.failed = False
+
+    # --- primitives ----------------------------------------------------------
+
     def draw_bank_rate(self):
-        """Draw bank rate Rb ~ 1 + U(0, 0.5) each period."""
+        """Draw Rb ~ 1 + U(0, 0.5) each period."""
+        if not self.active:
+            return
         self.Rb = 1.0 + random.random() * 0.5
 
+    def serve_queue(self, customers_per_step: int = 1):
+        """
+        Serve at most `customers_per_step` depositors from this bank's queue.
+        Each served depositor decides withdraw1/withdraw2 ONCE (has_decided flag).
+        """
+        if not self.active:
+            return
+
+        served_this_step = 0
+
+        while (served_this_step < customers_per_step) and (self.queue_index < len(self.customers)):
+            cust = self.customers[self.queue_index]
+            self.queue_index += 1
+
+            if not cust.active or cust.has_decided:
+                continue
+
+            cust.decide_withdrawals()
+
+            if cust.withdraw1 > 0 or cust.withdraw2 > 0:
+                self.served_customers.add(cust.unique_id)
+
+            served_this_step += 1
+
+        self.n_served = len(self.served_customers)
+
     def repay_previous_loan(self):
-        """Repay any outstanding one-period interbank loan."""
+        """Repay any outstanding 1-period interbank loan."""
         if self.loan_lender is None or self.loan_principal <= 0 or not self.active:
             return
 
-        amount = self.loan_principal * 1.0001
+        amount = self.loan_principal * 1.0001  # tiny interest
         self.fin_balance -= amount
         self.loan_lender.fin_balance += amount
 
@@ -184,45 +259,52 @@ class BankAgent:
 
     def update_balance_sheet(self):
         """
-        Compute withdrawals, investment, new balance, and handle interbank loan / failure.
-        Mirrors NetLogo 'bank-balance-sheet' in structure.
+        Bank balance sheet update (NetLogo 'bank-balance-sheet' structure):
+
+        1. Repay previous interbank loan if any.
+        2. Compute tot_withdrawals across ALL customers (active or not).
+        3. Decide investment based on withdraw1 activity vs expected impatients.
+        4. Update fin_balance = init_deposits - tot_withdrawals + invest + loan_principal.
+        5. If fin_balance < 0 and still have unserved customers (n_served < num_customers):
+           - If interbank market: try request_interbank_loan()
+           - Else: go_bankrupt()
         """
         if not self.active:
             return
 
-        # Repay previous loan first
+        # 1. Repay previous loan
         self.repay_previous_loan()
 
+        # 2. Total withdrawals (everyone counts, as in NetLogo)
         tot_withdrawals = 0.0
         n_withdraw1 = 0
-        n_served = 0
-
         for c in self.customers:
-            if not c.active:
-                continue
             tot_withdrawals += (c.withdraw1 + c.withdraw2)
             if c.withdraw1 > 0:
                 n_withdraw1 += 1
-            if (c.withdraw1 > 0) or (c.withdraw2 > 0):
-                n_served += 1
 
-        self.n_served = n_served
-
-        # Investment rule (global impatient info, as in V6)
-        n_impatient = self.model.n_impatient_total
-        expected_impatient = self.model.impatient_probability * self.model.num_customers_total
-        threshold = n_impatient / max(1e-9, expected_impatient)
-
+        # 3. Investment rule
         frac_withdraw1 = n_withdraw1 / max(1, self.num_customers)
+
+        n_impatient = self.model.n_impatient_total
+        expected_impatient = (
+            self.model.impatient_probability * self.model.num_customers_total
+            if self.model.impatient_probability > 0
+            else 1.0
+        )
+        threshold = n_impatient / max(1e-9, expected_impatient)
 
         if frac_withdraw1 <= threshold:
             invest = (self.init_deposits - tot_withdrawals) * self.Rb
         else:
             invest = 0.0
 
-        self.fin_balance = self.init_deposits - tot_withdrawals + invest + self.loan_principal
+        # 4. New balance
+        self.fin_balance = (
+            self.init_deposits - tot_withdrawals + invest + self.loan_principal
+        )
 
-        # If insolvent and still has customers to serve, try interbank or fail
+        # 5. Run condition: negative balance while queue not fully served
         if self.fin_balance < 0 and (self.n_served < self.num_customers):
             if self.model.interbank_market:
                 self.request_interbank_loan()
@@ -230,7 +312,10 @@ class BankAgent:
                 self.go_bankrupt()
 
     def request_interbank_loan(self):
-        """Borrow 10% of some solvent bank's balance if possible."""
+        """
+        Try to borrow 10% of another active bank's balance.
+        If no lender can be found, go bankrupt.
+        """
         if not self.active:
             return
 
@@ -252,29 +337,40 @@ class BankAgent:
         self.loan_principal = loan_amount
         self.loan_lender = lender
 
+        # If still insolvent after borrowing, fail
         if self.fin_balance < 0:
             self.go_bankrupt()
 
     def go_bankrupt(self):
-        """Mark bank as failed (bank run)."""
+        """Mark bank as failed (run)."""
         self.active = False
         self.failed = True
 
 
+# ----------------------------------------------------------------------
+# Model
+# ----------------------------------------------------------------------
+
 class BankRunModelV6(Model):
     """
-    Generic V6 model.
+    Queue-based multibank Diamond–Dybvig ABM.
 
     Parameters
     ----------
     num_banks : int
-    customer_distribution : list[int]
+        Number of banks.
+    customer_distribution : list[int], optional
         Customers per bank; e.g. [10,10,10,10] or [10,5,5,5].
     interbank_market : bool
-        If True, allow interbank loans; else isolated banks.
+        If True, banks can borrow from each other.
     impatient_probability : float
+        Probability a depositor is "impatient".
     initial_deposit : float
-    seed : int or None
+        Initial deposit per customer.
+    customers_per_step : int
+        How many customers per bank are served from the queue each step.
+    seed : int, optional
+        Random seed (for reproducibility). If None, do not reseed.
     """
 
     def __init__(
@@ -284,6 +380,7 @@ class BankRunModelV6(Model):
         interbank_market: bool = True,
         impatient_probability: float = 0.5,
         initial_deposit: float = 1.0,
+        customers_per_step: int = 1,
         seed: Optional[int] = None,
     ):
         super().__init__()
@@ -295,6 +392,7 @@ class BankRunModelV6(Model):
         self.interbank_market = interbank_market
         self.impatient_probability = impatient_probability
         self.initial_deposit = initial_deposit
+        self.customers_per_step = customers_per_step
 
         if customer_distribution is None:
             customer_distribution = [10] * num_banks
@@ -304,21 +402,21 @@ class BankRunModelV6(Model):
         self.num_customers_total = sum(customer_distribution)
         self.time = 0
 
-        self.banks: List[BankAgent] = []
-        self.customers: List[CustomerAgent] = []
+        self.banks: List[Bank] = []
+        self.customers: List[Customer] = []
 
-        # Create banks
+        # 1. Create banks
         customer_id_counter = 0
         for bank_id in range(num_banks):
             n_cust = customer_distribution[bank_id]
             customer_ids_for_bank = list(range(customer_id_counter,
                                                customer_id_counter + n_cust))
             customer_id_counter += n_cust
-            bank = BankAgent(unique_id=f"B{bank_id}", model=self,
-                             customer_ids=customer_ids_for_bank)
+            bank = Bank(unique_id=f"B{bank_id}", model=self,
+                        customer_ids=customer_ids_for_bank)
             self.banks.append(bank)
 
-        # Create customers and attach to banks
+        # 2. Create customers and attach to banks
         for bank in self.banks:
             for cid in bank.customer_ids:
                 if random.random() < self.impatient_probability:
@@ -326,7 +424,7 @@ class BankRunModelV6(Model):
                 else:
                     dtype = "patient"
 
-                cust = CustomerAgent(
+                cust = Customer(
                     unique_id=f"C{cid}",
                     model=self,
                     bank=bank,
@@ -338,35 +436,50 @@ class BankRunModelV6(Model):
 
         self.n_impatient_total = sum(1 for c in self.customers if c.dtype == "impatient")
 
-        # Only model-level reporter (no agent_reporters -> no schedule dependency)
+        # DataCollector: for now, just bank failure count & average fin_balance
         self.datacollector = DataCollector(
             model_reporters={
                 "num_failed_banks": lambda m: sum(1 for b in m.banks if b.failed),
-            },
+                "avg_fin_balance": lambda m: (
+                    sum(b.fin_balance for b in m.banks) / len(m.banks)
+                    if m.banks else 0.0
+                ),
+            }
         )
+
+    # ------------------------------------------------------------------
+    # One step of the model
+    # ------------------------------------------------------------------
 
     def step(self):
         """
-        One period:
-          1. Draw Rb for each bank and Rc for each customer.
-          2. Customers decide withdrawals.
-          3. Banks update balance sheets.
-          4. Collect data.
+        Sequence:
+          1. Banks draw Rb; active customers draw Rc.
+          2. Each bank serves a few customers in its queue (customers_per_step).
+          3. Banks update balance sheets, may borrow or fail.
+          4. Customers apply withdrawals to their deposits and may become inactive.
+          5. Collect data.
         """
+        # 1. Draw rates
         for bank in self.banks:
-            if bank.active:
-                bank.draw_bank_rate()
+            bank.draw_bank_rate()
 
         for cust in self.customers:
-            if cust.active:
-                cust.draw_subjective_rate()
+            cust.draw_subjective_rate()
 
-        for cust in self.customers:
-            cust.decide_withdrawals()
+        # 2. Serve queue
+        for bank in self.banks:
+            bank.serve_queue(customers_per_step=self.customers_per_step)
 
+        # 3. Bank balance sheets
         for bank in self.banks:
             bank.update_balance_sheet()
 
+        # 4. Apply withdrawals to customer accounts
+        for cust in self.customers:
+            cust.apply_withdrawals_and_update_accounts()
+
+        # 5. Collect data
         self.datacollector.collect(self)
         self.time += 1
 
@@ -376,13 +489,14 @@ class BankRunModelV6(Model):
 
 
 # ----------------------------------------------------------------------
-# Helper constructors for Colab / notebooks
+# Helper constructors for the three industrial setups
 # ----------------------------------------------------------------------
 
 def make_isolated_model(
     num_banks: int = 4,
     customers_per_bank: int = 10,
     impatient_probability: float = 0.5,
+    customers_per_step: int = 1,
     seed: Optional[int] = None,
 ) -> BankRunModelV6:
     """Isolated banks (no interbank market)."""
@@ -392,6 +506,8 @@ def make_isolated_model(
         customer_distribution=distribution,
         interbank_market=False,
         impatient_probability=impatient_probability,
+        initial_deposit=1.0,
+        customers_per_step=customers_per_step,
         seed=seed,
     )
 
@@ -400,15 +516,18 @@ def make_interbank_model(
     num_banks: int = 4,
     customers_per_bank: int = 10,
     impatient_probability: float = 0.5,
+    customers_per_step: int = 1,
     seed: Optional[int] = None,
 ) -> BankRunModelV6:
-    """Symmetric banks, with interbank market."""
+    """Symmetric banks with an interbank market."""
     distribution = [customers_per_bank] * num_banks
     return BankRunModelV6(
         num_banks=num_banks,
         customer_distribution=distribution,
         interbank_market=True,
         impatient_probability=impatient_probability,
+        initial_deposit=1.0,
+        customers_per_step=customers_per_step,
         seed=seed,
     )
 
@@ -419,13 +538,14 @@ def make_big_bank_model(
     small_size: int = 5,
     num_small_banks: int = 3,
     impatient_probability: float = 0.5,
+    customers_per_step: int = 1,
     seed: Optional[int] = None,
 ) -> BankRunModelV6:
     """
-    One big bank and several small ones, with interbank market.
+    One big bank in an interbank market.
     Example: big_size=10, small_size=5, num_small_banks=3 -> [10,5,5,5].
     """
-    customer_distribution = []
+    customer_distribution: List[int] = []
     for i in range(num_small_banks + 1):
         if i == big_bank_index:
             customer_distribution.append(big_size)
@@ -437,5 +557,7 @@ def make_big_bank_model(
         customer_distribution=customer_distribution,
         interbank_market=True,
         impatient_probability=impatient_probability,
+        initial_deposit=1.0,
+        customers_per_step=customers_per_step,
         seed=seed,
     )

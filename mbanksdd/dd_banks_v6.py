@@ -178,21 +178,20 @@ class Bank:
 
     State:
       - init_deposits : sum of initial deposits of its customers
-      - fin_balance   : current balance (after investment, withdrawals, loans)
+      - fin_balance   : current balance (after investment + withdrawals)
       - Rb            : bank's investment return
-      - loan_principal, loan_lender : interbank borrowing
       - queue_index   : where we are in the service queue
       - served_customers : set of customers who have been served at least once
       - n_served      : |served_customers|
       - active, failed
     """
 
-    def __init__(self, unique_id: str, model: "Bank",
+    def __init__(self, unique_id: str, model: "BankRunModelV6",
                  customer_ids: List[int]):
         self.unique_id = unique_id
         self.model = model
         self.customer_ids = customer_ids
-        self.customers: List[Customer] = []
+        self.customers: List["Customer"] = []
 
         self.num_customers = len(customer_ids)
 
@@ -201,9 +200,7 @@ class Bank:
 
         self.Rb = 1.0
 
-        self.loan_principal = 0.0
-        self.loan_lender: Optional["Bank"] = None
-
+        # Queue state
         self.queue_index = 0
         self.served_customers: Set[str] = set()
         self.n_served = 0
@@ -245,37 +242,21 @@ class Bank:
 
         self.n_served = len(self.served_customers)
 
-    def repay_previous_loan(self):
-        """Repay any outstanding 1-period interbank loan."""
-        if self.loan_lender is None or self.loan_principal <= 0 or not self.active:
-            return
-
-        amount = self.loan_principal * 1.0001  # tiny interest
-        self.fin_balance -= amount
-        self.loan_lender.fin_balance += amount
-
-        self.loan_principal = 0.0
-        self.loan_lender = None
-
     def update_balance_sheet(self):
         """
-        Bank balance sheet update (NetLogo 'bank-balance-sheet' structure):
+        Bank balance sheet update (NetLogo-style):
 
-        1. Repay previous interbank loan if any.
-        2. Compute tot_withdrawals across ALL customers (active or not).
-        3. Decide investment based on withdraw1 activity vs expected impatients.
-        4. Update fin_balance = init_deposits - tot_withdrawals + invest + loan_principal.
-        5. If fin_balance < 0 and still have unserved customers (n_served < num_customers):
-           - If interbank market: try request_interbank_loan()
+        1. Compute total withdrawals (everyone counts, even if they will later go negative).
+        2. Decide investment based on fraction with withdraw1 vs expected impatients.
+        3. Update fin_balance = init_deposits - tot_withdrawals + invest.
+        4. If fin_balance < 0 and there are still customers in line (n_served < num_customers):
+           - If interbank market: call interbank_support()
            - Else: go_bankrupt()
         """
         if not self.active:
             return
 
-        # 1. Repay previous loan
-        self.repay_previous_loan()
-
-        # 2. Total withdrawals (everyone counts, as in NetLogo)
+        # 1. Total withdrawals across all customers
         tot_withdrawals = 0.0
         n_withdraw1 = 0
         for c in self.customers:
@@ -283,7 +264,7 @@ class Bank:
             if c.withdraw1 > 0:
                 n_withdraw1 += 1
 
-        # 3. Investment rule
+        # 2. Investment rule
         frac_withdraw1 = n_withdraw1 / max(1, self.num_customers)
 
         n_impatient = self.model.n_impatient_total
@@ -299,45 +280,59 @@ class Bank:
         else:
             invest = 0.0
 
-        # 4. New balance
-        self.fin_balance = (
-            self.init_deposits - tot_withdrawals + invest + self.loan_principal
-        )
+        # 3. New balance before interbank support
+        self.fin_balance = self.init_deposits - tot_withdrawals + invest
 
-        # 5. Run condition: negative balance while queue not fully served
+        # 4. Run condition: negative balance while queue not fully served
         if self.fin_balance < 0 and (self.n_served < self.num_customers):
             if self.model.interbank_market:
-                self.request_interbank_loan()
+                self.interbank_support()
             else:
                 self.go_bankrupt()
 
-    def request_interbank_loan(self):
+    def interbank_support(self):
         """
-        Try to borrow 10% of another active bank's balance.
-        If no lender can be found, go bankrupt.
+        System-wide pooling:
+
+        - Compute this bank's deficit D = -fin_balance (>0).
+        - Look at all other active banks with fin_balance > 0.
+        - Let S = sum of their surpluses.
+        - If S >= D: transfer D to this bank, taking from donors
+          proportionally to their surpluses (donors stay >= 0).
+        - If S < D: this bank still can't be saved -> go_bankrupt().
         """
         if not self.active:
             return
 
-        candidates = [
+        deficit = -self.fin_balance
+        if deficit <= 0:
+            return
+
+        donors = [
             b for b in self.model.banks
             if (b is not self) and b.active and (b.fin_balance > 0)
         ]
 
-        if not candidates:
+        total_surplus = sum(b.fin_balance for b in donors)
+
+        if total_surplus <= 0:
+            # No liquidity in the rest of the system
             self.go_bankrupt()
             return
 
-        lender = random.choice(candidates)
-        loan_amount = 0.1 * lender.fin_balance
+        # Amount of support available (cannot exceed total_surplus)
+        support = min(deficit, total_surplus)
 
-        lender.fin_balance -= loan_amount
-        self.fin_balance += loan_amount
+        # Take proportionally from all donors
+        for b in donors:
+            share = b.fin_balance / total_surplus
+            deduction = share * support
+            b.fin_balance -= deduction
 
-        self.loan_principal = loan_amount
-        self.loan_lender = lender
+        # Give full support to this bank
+        self.fin_balance += support
 
-        # If still insolvent after borrowing, fail
+        # If still insolvent, fail
         if self.fin_balance < 0:
             self.go_bankrupt()
 
@@ -345,6 +340,7 @@ class Bank:
         """Mark bank as failed (run)."""
         self.active = False
         self.failed = True
+
 
 
 # ----------------------------------------------------------------------
